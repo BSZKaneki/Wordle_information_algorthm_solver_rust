@@ -1,108 +1,168 @@
 use ahash::AHashMap;
 use rand::prelude::IndexedRandom;
-use std::collections::HashSet;
+use rayon::{prelude::*, vec};
 use std::io::{self};
 
 struct WordleGame {
     target_word: String,
-    correct_gussed_characters: Vec<(char, i32)>,
+    correct_gussed_characters: Vec<CharGuess>,
     attempts: usize,
     max_attempts: usize,
+    words: Vec<String>,
 }
+#[derive(Debug, Clone)]
+struct CharGuess {
+    c: u8,
+    feedback: u8,    // Green, Yellow, Gray
+    position: usize, // actual index of the guess
+}
+
 impl WordleGame {
-    // fn open_file(path: &str) -> Result<Vec<String>, io::Error> {
-    //     let file = File::open(path)?;
-    //     let mut reader = BufReader::new(file);
-    //     let mut buffer = Vec::new();
-    //     reader.read_to_end(&mut buffer)?;
-
-    //     let words: Vec<String> = buffer
-    //         .split(|&byte| byte == b'\n')
-    //         .filter_map(|line| String::from_utf8(line.to_vec()).ok())
-    //         .collect();
-
-    //     Ok(words)
-    // }
-    fn random_world() -> Result<String, io::Error> {
+    fn new(max_attempts: usize) -> Self {
         const WORD_LIST: &str = include_str!("possible_anwsers.txt");
         let words: Vec<String> = WORD_LIST
             .lines()
             .filter_map(|line| line.trim().to_string().into())
             .collect();
-
-        if words.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "No words available",
-            ));
-        }
-
         let mut rng = rand::rngs::ThreadRng::default();
         let random_word = words.choose(&mut rng).expect("No words available");
-
-        Ok(random_word.clone())
-    }
-    fn new(target_word: String, max_attempts: usize) -> Self {
+        let target_word = random_word.clone();
         WordleGame {
             target_word,
             attempts: 0,
             max_attempts,
-            correct_gussed_characters: vec![], // Initialize with 5 dots for each character
+            correct_gussed_characters: vec![],
+            words,
         }
     }
-    fn entrohpy_allgorithm(&self) -> Result<(String, f64), io::Error> {
-        const WORD_LIST: &str = include_str!("wordle_possibles.txt");
-        let words: Vec<String> = WORD_LIST
-            .lines()
-            .filter_map(|line| line.trim().to_string().into())
-            .collect();
 
-        if words.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "No words available",
-            ));
-        };
-        let total_words = words.len() as f64;
-        let mut biggest_entropy_word: String = String::new();
-        let mut pattern_counts: AHashMap<String, usize> = AHashMap::new();
-        let mut expected_information_gain = 0.0;
+    fn is_word_valid(&self, word: &str) -> bool {
+        for guess in &self.correct_gussed_characters {
+            let c = guess.c as char;
+            let feedback = guess.feedback;
+            let pos = guess.position;
 
-        for word in &words {
-            let mut pattern = String::new();
-            for (i, c) in word.chars().enumerate() {
-                if word.chars().nth(i).unwrap() == c {
-                    pattern.push('1'); // Correct position
-                } else if self.target_word.contains(c) {
-                    pattern.push('2'); // Wrong position
-                } else {
-                    pattern.push('0'); // Not in the word
+            match feedback {
+                2 => {
+                    // Green: character must be at this position
+                    if word.chars().nth(pos).unwrap_or('_') != c {
+                        return false;
+                    }
                 }
-            }
-            *pattern_counts.entry(pattern).or_insert(0) += 1;
-            let mut entropy = 0.0;
-            for &count in pattern_counts.values() {
-                let probability = count as f64 / total_words;
-                if probability > 0.0 {
-                    entropy -= probability * probability.log2();
+                1 => {
+                    // Yellow: must contain the character, but not at this position
+                    if !word.contains(c) || word.chars().nth(pos).unwrap_or('_') == c {
+                        return false;
+                    }
                 }
+                0 => {
+                    // Gray: must NOT contain the character *unless* already guessed as green/yellow
+                    let appeared_in_other_guess = self
+                        .correct_gussed_characters
+                        .iter()
+                        .any(|g| g.c == guess.c && g.feedback != 0);
+
+                    if !appeared_in_other_guess && word.contains(c) {
+                        return false;
+                    }
+                }
+                _ => {}
             }
-            if entropy > expected_information_gain {
-                expected_information_gain = entropy;
-                biggest_entropy_word = word.clone();
+        }
+        true
+    }
+
+    fn pattern_from_guess(&self, guess: &str, answer: &str) -> String {
+        let mut pattern = vec![0; 5];
+        let mut answer_chars: Vec<char> = answer.chars().collect();
+        let guess_chars: Vec<char> = guess.chars().collect();
+
+        // First pass: mark greens (2)
+        for i in 0..5 {
+            if guess_chars[i] == answer_chars[i] {
+                pattern[i] = 2;
+                answer_chars[i] = '_'; // Mark as used
             }
         }
 
-        Ok((biggest_entropy_word, expected_information_gain))
-    }
-        fn guess(&mut self, guessed_word: &str) -> Result<String, String> {
-            // Create a set of already guessed characters (uppercase)
-        let correct_guessed_set: HashSet<char> = self
-            .correct_gussed_characters
+        // Second pass: mark yellows (1)
+        for i in 0..5 {
+            if pattern[i] == 0 {
+                if let Some(pos) = answer_chars.iter().position(|&c| c == guess_chars[i]) {
+                    pattern[i] = 1;
+                    answer_chars[pos] = '_'; // Mark as used
+                }
+            }
+        }
+
+        pattern
             .iter()
-            .map(|&(c, _)| c.to_ascii_uppercase())
+            .map(|&n| char::from_digit(n, 10).unwrap())
+            .collect()
+    }
+
+    fn entrohpy_allgorithm(&self) -> Result<(String, f64), io::Error> {
+        let posible_words: Vec<String> = self
+            .words
+            .iter()
+            .filter(|&word| self.is_word_valid(word))
+            .cloned()
+            .collect();
+        let total_words = posible_words.len();
+
+        // Debug: Print remaining possible words
+        println!("Remaining possible words: {}", posible_words.len());
+
+        if total_words == 1 {
+            return Ok((posible_words[0].clone(), 0.0));
+        } else if total_words <= 20 {
+            println!("Words: {:?}", posible_words);
+        }
+
+        let entropies: Vec<(String, f64)> = self
+            .words
+            .par_iter()
+            .map(|word| {
+                let mut frequency_map: AHashMap<String, usize> = AHashMap::new();
+                for w in &posible_words {
+                    let pattern = self.pattern_from_guess(word, w);
+                    *frequency_map.entry(pattern).or_insert(0) += 1;
+                }
+
+                let entropy = frequency_map
+                    .values()
+                    .map(|&count| {
+                        if total_words == 0 {
+                            return 0.0;
+                        }
+                        let p = count as f64 / total_words as f64;
+                        if p > 0.0 { -p * p.log2() } else { 0.0 }
+                    })
+                    .sum();
+
+                (word.clone(), entropy)
+            })
             .collect();
 
+        // Debug: Show top 5 candidates
+        let mut sorted_entropies = entropies.clone();
+        sorted_entropies.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        println!("Top 5 entropy words:");
+        for (word, entropy) in sorted_entropies.iter().take(5) {
+            println!("  {}: {:.4}", word, entropy);
+        }
+
+        let (best_word, best_entropy) = entropies
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap()
+            .clone();
+
+        println!("Best word: {}, Entropy: {}", best_word, best_entropy);
+        Ok((best_word, best_entropy))
+    }
+
+    fn guess(&mut self, guessed_word: &str) -> Result<String, String> {
         if guessed_word.len() != 5 {
             return Err("Please enter a valid 5-letter word.".to_string());
         }
@@ -122,38 +182,53 @@ impl WordleGame {
             ));
         }
 
-        let mut correct_gussed_characters = String::with_capacity(5);
+        let mut correct_gussed_characters_str = String::with_capacity(5);
         let guessed_chars: Vec<char> = guessed_word.chars().collect();
         let target_chars: Vec<char> = self.target_word.chars().collect();
 
         for i in 0..5 {
             let c = guessed_chars[i];
             let target_char = target_chars[i];
-            let uppercase_c = c.to_ascii_uppercase();
-
-            if c == target_char {
-                if !correct_guessed_set.contains(&uppercase_c) {
-                    self.correct_gussed_characters
-                        .push((uppercase_c, i as i32 + 1));
-                }
-                correct_gussed_characters.push(uppercase_c);
+            let feedback = if c == target_char {
+                2 // Green
             } else if self.target_word.contains(c) {
-                if !correct_guessed_set.contains(&uppercase_c) {
-                    self.correct_gussed_characters.push((uppercase_c, 0));
-                }
-                correct_gussed_characters.push(c.to_ascii_lowercase()); // Differentiate from correct position
+                1 // Yellow
             } else {
-                correct_gussed_characters.push('.');
+                0 // Gray
+            };
+
+            let guess = CharGuess {
+                c: c as u8,
+                feedback,
+                position: i,
+            };
+
+            // Only insert if this exact guess doesn't already exist
+            let is_duplicate = self.correct_gussed_characters.iter().any(|g| {
+                g.c == guess.c && g.feedback == guess.feedback && g.position == guess.position
+            });
+
+            if !is_duplicate {
+                self.correct_gussed_characters.push(guess);
+            }
+
+            // Build display string
+            match feedback {
+                2 => correct_gussed_characters_str.push(c.to_ascii_uppercase()),
+                1 => correct_gussed_characters_str.push(c.to_ascii_lowercase()),
+                _ => correct_gussed_characters_str.push('.'),
             }
         }
 
-        println!("{:?} ", self.correct_gussed_characters);
-        Ok(format!("Correct characters: {}", correct_gussed_characters))
+        Ok(format!(
+            "Correct characters: {}",
+            correct_gussed_characters_str
+        ))
     }
 
     fn auto_game(&mut self) -> Result<(), String> {
         while self.attempts < self.max_attempts {
-            let mut guessed_word_and_entropy = self.entrohpy_allgorithm();
+            let guessed_word_and_entropy = self.entrohpy_allgorithm();
             print!(
                 "{:?} is the best guess word with entropy: ",
                 guessed_word_and_entropy
@@ -163,7 +238,7 @@ impl WordleGame {
                 "Attempt {}: Please guess a 5-letter word:",
                 self.attempts + 1
             );
-            guessed_word = guessed_word.trim().to_string(); // Remove whitespace and newline characters
+            guessed_word = guessed_word.to_string(); // Remove whitespace and newline characters
 
             match self.guess(&guessed_word) {
                 Ok(message) => {
@@ -184,106 +259,16 @@ impl WordleGame {
     }
 }
 
-/* Playable worldle game function
-
-
-fn wordle_game() -> io::Result<()> {
-    let file = File::open("D:\\programing\\rust\\Lerning\\game\\src\\possible_words.txt")?;
-    let mut reader = BufReader::new(file);
-
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer)?;
-
-    let words: Vec<String> = buffer
-        .split(|&byte| byte == b'\n')
-        .filter_map(|line| String::from_utf8(line.to_vec()).ok())
-        .collect();
-
-    let mut rng = rand::thread_rng();
-    let random_word = words.choose(&mut rng).expect("No words available");
-
-    let mut attempts = 0;
-    let max_attempts = 6;
-    let mut guessed_word = String::new();
-    let target_word = random_word.trim();
-    println!("{} is the target word", target_word);
-
-    while attempts < max_attempts {
-        let mut gussed_characters = String::new();
-        println!("Attempt {}: Please guess a 5-letter word:", attempts + 1);
-        io::stdin().read_line(&mut guessed_word)?;
-        guessed_word = guessed_word.trim().to_string(); // Remove whitespace and newline characters
-
-        if guessed_word.len() != 5 {
-            println!("Please enter a valid 5-letter word.");
-            println!("{}",guessed_word.len());
-            guessed_word.clear(); // Clear the guessed word for the next attempt
-            continue;
-        }
-
-        if guessed_word == target_word {
-            println!("Congratulations! You've guessed the word: {}", target_word);
-            return Ok(());
-        } else {
-            println!("Incorrect guess. Try again.");
-            attempts += 1;
-            for (i, c) in guessed_word.chars().enumerate() {
-                let target_char = target_word.chars().nth(i).unwrap();
-                if c == target_char {
-                    gussed_characters.insert(i, c.to_uppercase().next().unwrap());
-
-                } else if target_word.contains(c) {
-                    gussed_characters.insert(i, c);
-
-                } else {
-                    gussed_characters.insert_str(i,". ");
-                }
-            }
-            println!("{} ", gussed_characters);
-
-            guessed_word.clear();
-
-        }
-    }
-    println!("Sorry, you've used all attempts. The word was: {}", target_word);
-
-    Ok(())
-}
-*/
-
 fn main() {
-    let Random_word = WordleGame::random_world().expect("Failed to get a random word");
-    let mut game = WordleGame::new(Random_word, 6);
+    let mut game = WordleGame::new(6);
     println!(
         "Welcome to Wordle! You have {} attempts to guess the 5-letter word.",
         game.max_attempts
     );
-
-    // let entropy:(String, f64)     = game.entrohpy_allgorithm().expect("Failed to calculate entropy word");
-    // print!("Entropy word is: {:?}", entropy);
 
     let auto_game_result = game.auto_game();
     match auto_game_result {
         Ok(_) => println!("Game completed successfully!"),
         Err(e) => println!("Game ended with error: {}", e),
     }
-
-    // loop {
-    //     let mut guessed_word = String::new();
-    //     println!("Please enter your guess:");
-    //     io::stdin().read_line(&mut guessed_word).expect("Failed to read line");
-    //     guessed_word = guessed_word.trim().to_string(); // Remove whitespace and newline characters
-
-    //     match game.guess(&guessed_word) {
-    //         Ok(message) => {
-    //             println!("{}", message);
-    //             if guessed_word == game.target_word {
-    //                 break; // Exit the loop if the word is guessed correctly
-    //             }
-    //         },
-    //         Err(error) => {
-    //             println!("{}", error);
-    //         }
-    //     }
-    // }
 }
