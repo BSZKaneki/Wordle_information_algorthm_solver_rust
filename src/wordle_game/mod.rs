@@ -44,19 +44,16 @@ impl WordleGame {
 
             match feedback {
                 2 => {
-                    // Green: character must be at this position
                     if word.chars().nth(pos).unwrap_or('_') != c {
                         return false;
                     }
                 }
                 1 => {
-                    // Yellow: must contain the character, but not at this position
                     if !word.contains(c) || word.chars().nth(pos).unwrap_or('_') == c {
                         return false;
                     }
                 }
                 0 => {
-                    // Gray: must NOT contain the character *unless* already guessed as green/yellow
                     let appeared_in_other_guess = self
                         .correct_gussed_characters
                         .iter()
@@ -118,7 +115,6 @@ impl WordleGame {
         } else if total_words <= 20 {
             println!("Words: {:?}", posible_words);
         }
-
         let entropies: Vec<(String, f64)> = self
             .words
             .par_iter()

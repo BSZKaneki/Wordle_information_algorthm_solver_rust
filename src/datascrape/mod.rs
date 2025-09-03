@@ -8,17 +8,15 @@ use wordle_game::{CharGuess, WordleGame};
 pub async fn run_wordle_bot() -> Result<(), Box<dyn std::error::Error>> {
     let mut game = WordleGame::new(6);
     let mut client = ClientBuilder::native()
-        .connect("http://localhost:50600")
+        .connect("http://localhost:50216")
         .await?;
 
     client
         .goto("https://www.nytimes.com/games/wordle/index.html")
         .await?;
 
-    // Give the page some time to load cookie banner
     sleep(Duration::from_secs(2)).await;
 
-    // Retry loop: wait until button is visible
     let buttons = client
         .find_all(Locator::Css(".fides-accept-all-button"))
         .await?;
@@ -63,23 +61,19 @@ pub async fn run_wordle_bot() -> Result<(), Box<dyn std::error::Error>> {
     for row_index in 0..game.max_attempts {
         println!("Starting row {}", row_index);
 
-        // Simulate human delay
         sleep(Duration::from_secs(3)).await;
 
-        // Get the next best guess word using your entropy algorithm
         let (guess_word, entropy) = game.entrohpy_allgorithm()?; // propagate error
         println!(
             "{:?} is the best guess word with entropy: {}",
             guess_word, entropy
         );
 
-        // Input the guessed word via your async client
         if let Err(e) = input_word(&mut client, &guess_word).await {
             println!("Error inputting word: {}", e);
             break;
         }
 
-        // Get feedback from the game board
         let row_result =
             match word_results_from_row(&mut client, row_index, guess_word.clone()).await {
                 Ok(res) => res,
@@ -89,7 +83,6 @@ pub async fn run_wordle_bot() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-        // Store feedback internally
         for fb in row_result.iter() {
             let guess = CharGuess {
                 c: guess_word.chars().nth(fb.position).unwrap() as u8,
@@ -106,7 +99,6 @@ pub async fn run_wordle_bot() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Build display string
         let display_str: String = row_result
             .iter()
             .map(|fb| {
@@ -134,7 +126,7 @@ fn input_word(
     async move {
         let body = body.await?;
         body.send_keys(&word).await?;
-        body.send_keys("\u{E007}").await?; // Enter
+        body.send_keys("\u{E007}").await?; 
         Ok(())
     }
 }
@@ -154,7 +146,7 @@ fn word_results_from_row(
         let mut char_guesses = Vec::new();
 
         for (position, tile) in tiles.iter().enumerate() {
-            sleep(Duration::from_millis(2000)).await;
+            sleep(Duration::from_millis(3000)).await;
             let letter = guesed_word
                 .chars()
                 .nth(position)
@@ -163,15 +155,15 @@ fn word_results_from_row(
             let state = tile.attr("data-state").await?.unwrap_or_default();
 
             let feedback = match state.as_str() {
-                "correct" => 2, // Green
-                "present" => 1, // Yellow
-                "absent" => 0,  // Gray
-                _ => 0,         // Default to Gray (e.g., "empty")
+                "correct" => 2, 
+                "present" => 1,
+                "absent" => 0,  
+                _ => 0,         
             };
             let c = if let Some(ch) = letter.chars().next() {
                 ch as u8
             } else {
-                0 // Default for empty/invalid characters
+                0 
             };
 
             char_guesses.push(CharGuess {
